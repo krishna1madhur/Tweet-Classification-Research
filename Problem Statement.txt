@@ -1,0 +1,22 @@
+GIVEN:
+
+The attached is the training data in an excel file, which has two sheets 
+(1)Obama tweets and (2) Romney tweets.
+
+The class labels in the data are:
+1: positive opinion, 
+-1: negative opinion,
+0: neutral or no opinion, 
+2: mixed opinion (there is positive and negative opinion)
+
+OBJECTIVE:
+
+1. Build a classifier to classify tweets into three classes: 1, -1, 0. You can ignore the mixed class. The final test data will not have the mixed class.
+
+2. Validate your classifer models using KFold Cross Validation(k=10).
+
+Required results for Obama and Romney separately:
+
+1. Positive class: Precision, recall, F-score
+2. Negative class: precision, recall, F-score.
+3. Overall accuracy.

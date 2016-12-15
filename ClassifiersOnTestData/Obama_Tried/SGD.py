@@ -1,13 +1,15 @@
 import openpyxl
 import re
 import string
-import nltk
+import nltk,csv
 from nltk.corpus import stopwords
 from nltk.stem.porter import PorterStemmer
 from nltk.tokenize import RegexpTokenizer
-from sklearn.model_selection import KFold
+from sklearn.model_selection import StratifiedKFold
+from sklearn.linear_model import SGDClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer, TfidfTransformer
 from sklearn import svm
+from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import accuracy_score,f1_score,precision_score,recall_score,classification_report,confusion_matrix
 from sklearn.neural_network import MLPClassifier
 
@@ -18,8 +20,10 @@ obamaClassLabelList = []
 romneyTweetList = []
 romneyClassLabelList = []
 featureList = []
-punc = string.punctuation.replace('_', '')
+testTweetList = []
+testLabelList = [] 
 
+punc = string.punctuation.replace('_', '')
 punc_regex = re.compile('[%s]' % re.escape(punc))
 url_regex = '(http|ftp|https)://([\w_-]+(?:(?:\.[\w_-]+)+))([\w.,@?^=%&:/~+#-]*[\w@?^=%&/~+#-])?'
 nonalpha1 = re.compile('[0-9]+[a-z]+')
@@ -43,12 +47,28 @@ def retrieveTweets(sheet):
             localLabelList.append(int(classLabel))
             localTweetList.append(tweet)
             count = count + 1
-
     return localTweetList,localLabelList
-
+def retrieveTestTweets(sheet):
+    localLabelList = []
+    localTweetList = []
+    count = 0
+    print("Sheet Name:",sheet)
+	
+    for row in range(3, sheet.max_row + 1):
+        classLabel = str( sheet['E' + str(row)].value)
+        tweet = sheet['A' + str(row)].value
+        if(classLabel == "0" or classLabel == "1"or classLabel == "-1") and (tweet is not None ):
+            localLabelList.append(int(classLabel))
+            localTweetList.append(tweet)
+            count = count + 1
+    return localTweetList,localLabelList
+	
 def removePunc(tweet):
     temp = re.sub(url_regex, ' ', tweet).strip()  # Remove URLs from the text
-    temp = re.sub('^@([A-Za-z0-9_]+)', ' ', temp).strip()
+    temp = re.sub('@[\\w]*', ' ', temp).strip()
+    temp = re.sub('rt',' ',temp).strip()
+    temp = re.sub('yeah','yes',temp).strip()
+    temp = re.sub('yess','yes',temp).strip()
     return tokenizer.tokenize(temp)
 
 #start replaceTwoOrMore
@@ -58,6 +78,13 @@ def replaceTwoOrMore(s):
     return pattern.sub(r"\1\1", s)
 #end
 
+def removealphanumeric(wordList):
+    newWordList = []
+    for word in wordList:
+        newWord = re.sub('[^A-Za-z0-9]+', '', word)
+        newWordList.append(newWord)
+    return newWordList
+
 def preProcess(tweetList):
     tempList = []
     for tweet in tweetList:
@@ -65,11 +92,16 @@ def preProcess(tweetList):
         tweet = removePunc(tweet)
         tweet_removeNumbers = [item for item in tweet if not item.isdigit()]
         tweet_removeSingleCharacters = [s for s in tweet_removeNumbers if len(s) != 1]
-        tweet_removeObamaRomney = [s for s in tweet_removeSingleCharacters if s not in ('obama','romney')]
-        tweet_removetwoormore = [replaceTwoOrMore(word) for word in tweet_removeObamaRomney]
-        tweet_nostopwords = [word for word in tweet_removetwoormore if not word in STOPWORDS]
-        tweet_stemmed = [STEMMER.stem(word) for word in tweet_nostopwords]
-        tempList.append(tweet_stemmed)
+#        tweet_removeObamaRomney = [s for s in tweet_removeSingleCharacters if s not in ('obama','romney')]
+        tweet_removetwoormore = [replaceTwoOrMore(word) for word in tweet_removeSingleCharacters]
+        tweet_alphanumberic = removealphanumeric(tweet_removetwoormore)
+        tweet_nostopwords = [word for word in tweet_alphanumberic if not word in STOPWORDS]
+#        tweet_stemmed = [STEMMER.stem(word) for word in tweet_nostopwords]
+        for word in tweet_nostopwords:
+            if(word == 'yess'):
+                tweet_nostopwords.remove(word)
+                tweet_nostopwords.append('yes')
+        tempList.append(tweet_nostopwords)
     return tempList
 def AccessSheets():
     # OPEN THE EXCEL
@@ -80,6 +112,16 @@ def AccessSheets():
     # SEND TWEETS FOR PREPROCESSING
     obamaTweetList = preProcess(obamaTweetList)
 
+def saveProcessedTweets(tweetList,labelList):
+    csvfile = "processed3.csv"
+    # Assuming res is a flat list
+    with open(csvfile, "w") as output:
+        writer = csv.writer(output, lineterminator='\n')
+        for val in tweetList:
+            writer.writerow([val])
+        for val in labelList:
+            writer.writerow([val])	
+	
 def extract_features(tweet):
     global featureList
     tweet_words = set(tweet)
@@ -119,17 +161,26 @@ def metricsComputation(predicted, xTestLabelList):
     print("r- " + str(recallNegative))
     print("p- " + str(precisionNegative))
     return precisionPositive,recallPositive,precisionNegative,recallNegative
-
+def testModel():
+    wb = openpyxl.load_workbook('testing-Obama-Romney-tweets.xlsx')
+    obamaSheet = wb.get_sheet_by_name('Obama')
+    testTweetList, testLabelList = retrieveTestTweets(obamaSheet)
+    # SEND TWEETS FOR PREPROCESSING
+    testTweetList = preProcess(testTweetList)
+    print(str(len(testTweetList)))
+    return testTweetList,testLabelList
 def TrainModel():
-    global obamaTweetList, obamaClassLabelList, featureList
+    global obamaTweetList, obamaClassLabelList
     ObamaFinalTweets = []
-    features =[]
+    xTestTweetList = []
+	
     print("TRAINING DATA")
+	#REMOVE TWEETS THAT DOESN NOT CONTAIN ANY WORDS
     for i in range(0, len(obamaTweetList)):
         if len(obamaTweetList[i]) <= 0:
             continue
         ObamaFinalTweets.append((obamaTweetList[i], obamaClassLabelList[i]))
-    finalAccuracy = 0
+
     tweetList = []
     labelList = []
     for item in ObamaFinalTweets:
@@ -137,57 +188,42 @@ def TrainModel():
         tweetList.append(str1.strip())
         labelList.append(item[1])
     count_vect = CountVectorizer()
-    kf = KFold(n_splits=10, shuffle=False)
-    kf.get_n_splits(tweetList)
-    
-    precisionPositiveFold = 0
-    recallPositiveFold = 0
-    precisionNegativeFold = 0
-    recallNegativeFold = 0
-    for traincv, testcv in kf.split(tweetList):
-        xTweetList = []
-        xLabelList = []
-        xTestList = []
-        xTestLabelList = []
-        for i in range(0, len(traincv)):
-            xTweetList.append(tweetList[traincv[i]])
-            xLabelList.append(labelList[traincv[i]])
-        X = count_vect.fit_transform(xTweetList)
-        tfidf_transformer = TfidfTransformer()
-        X_train_tfidf = tfidf_transformer.fit_transform(X)
+	
+#    saveProcessedTweets(tweetList, labelList)
 
-        classifier = MLPClassifier(solver='lbfgs', alpha=1e-5, hidden_layer_sizes=(15,), random_state=1)
-        classifier.fit(X_train_tfidf, xLabelList)
+	#CONVERTING THE TWEETS TO TF-IDF VECTOR FORM
+    X = count_vect.fit_transform(tweetList)
+    tfidf_transformer = TfidfTransformer()
+    X_train_tfidf = tfidf_transformer.fit_transform(X)
+	
+	#TRAINING THE CLASSIFIER
+    classifier = SGDClassifier(loss="hinge", penalty="l2")
+    classifier.fit(X_train_tfidf, labelList)
+	
+	#TESTING TWEETS
+    testTweetList, testLabelList = testModel()
+    for item in testTweetList:
+        str1 = ' '.join(item)
+        xTestTweetList.append(str1.strip())
+	
+    X_new_counts = count_vect.transform(xTestTweetList)
+    X_new_tfidf = tfidf_transformer.transform(X_new_counts)
+    predicted = classifier.predict(X_new_tfidf)
 
-        for i in range(0,len(testcv)):
-            xTestList.append(tweetList[testcv[i]])
-            xTestLabelList.append(labelList[testcv[i]])
-
-        X_new_counts = count_vect.transform(xTestList)
-        X_new_tfidf = tfidf_transformer.transform(X_new_counts)
-        predicted = classifier.predict(X_new_tfidf)
-
-        accuracy = accuracy_score(predicted,xTestLabelList)
-        print("accuracy" + str(accuracy))
-
-        finalAccuracy = finalAccuracy + accuracy
-        precisionPositive,recallPositive,precisionNegative,recallNegative = metricsComputation(predicted, xTestLabelList)
-        precisionPositiveFold = precisionPositiveFold + precisionPositive
-        recallPositiveFold = recallPositive + recallPositiveFold
-        precisionNegativeFold = precisionNegativeFold + precisionNegative
-        recallNegativeFold = recallNegative + recallNegativeFold
-
-    print("Final Accuracy" + str(finalAccuracy / 10))
-    print("Final Positive Precision: " + str(precisionPositiveFold / 10))
-    print("Final Positive Recall: " + str(recallPositiveFold / 10))
-    print("Final Positive F1: " + str((2 * precisionPositive * recallPositive) / (precisionPositive + recallPositive)))
-
-    print("Final Negative Precision: " + str(precisionNegativeFold / 10))
-    print("Final Negative Recall: " + str(recallNegativeFold / 10))
-    print("Final Negative F1: " + str((2 * precisionPositive * recallPositive) / (precisionPositive + recallPositive)))
-    print("Final Accuracy:" + str(finalAccuracy/10))
+    accuracy = accuracy_score(predicted,testLabelList)
+    precisionPositive, recallPositive, precisionNegative, recallNegative = metricsComputation(predicted,testLabelList)
+	
+    print("Accuracy" + str(accuracy))
+    print("POSITIVE CLASS: ")
+    print("Precision: " + str(precisionPositive))
+    print("Recall: " + str(recallPositive))
+    print("F1: " + str((2 * precisionPositive * recallPositive) / (precisionPositive + recallPositive)))
+    print("NEGATIVE CLASS: ")
+    print("Precision: " + str(precisionNegative))
+    print("Recall: " + str(recallNegative))
+    print("F1: " + str((2 * precisionNegative * recallNegative) / (precisionNegative + recallNegative)))
     print("Tesing Done")
-
+	
 if __name__ == "__main__":
     AccessSheets()
     TrainModel()

@@ -2,15 +2,19 @@ import openpyxl
 import re
 import string
 import nltk
+import csv
 from nltk.corpus import stopwords
 from nltk.stem.porter import PorterStemmer
 from nltk.tokenize import RegexpTokenizer
-from sklearn.model_selection import KFold
+from sklearn.model_selection import StratifiedKFold
+from sklearn.linear_model import SGDClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer, TfidfTransformer
 from sklearn import svm
 from sklearn.metrics import accuracy_score,f1_score,precision_score,recall_score,classification_report,confusion_matrix
 from sklearn.neural_network import MLPClassifier
 from sklearn.naive_bayes import MultinomialNB
+from sklearn.ensemble import VotingClassifier
+from sklearn.linear_model import LogisticRegression
 
 import numpy as np
 
@@ -26,7 +30,6 @@ url_regex = '(http|ftp|https)://([\w_-]+(?:(?:\.[\w_-]+)+))([\w.,@?^=%&:/~+#-]*[
 nonalpha1 = re.compile('[0-9]+[a-z]+')
 nonalpha2 = re.compile('\s[0-9]+\s')
 one_two = '\s+\w\w?\s+'
-
 
 STOPWORDS = set(stopwords.words('english'))
 STEMMER = PorterStemmer()
@@ -49,7 +52,10 @@ def retrieveTweets(sheet):
 
 def removePunc(tweet):
     temp = re.sub(url_regex, ' ', tweet).strip()  # Remove URLs from the text
-    temp = re.sub('^@([A-Za-z0-9_]+)', ' ', temp).strip()
+    temp = re.sub('@[\\w]*', ' ', temp).strip()
+    temp = re.sub('rt',' ',temp).strip()
+    temp = re.sub('yeah','yes',temp).strip()
+    temp = re.sub('yess','yes',temp).strip()
     return tokenizer.tokenize(temp)
 
 #start replaceTwoOrMore
@@ -58,7 +64,14 @@ def replaceTwoOrMore(s):
     pattern = re.compile(r"(.)\1{1,}", re.DOTALL)
     return pattern.sub(r"\1\1", s)
 #end
+def removealphanumeric(wordList):
+    newWordList = []
+    for word in wordList:
+        newWord = re.sub('[^A-Za-z0-9]+', '', word)
+        newWord = re.sub('rt','',word)
 
+        newWordList.append(newWord)
+    return newWordList
 def preProcess(tweetList):
     tempList = []
     for tweet in tweetList:
@@ -66,20 +79,35 @@ def preProcess(tweetList):
         tweet = removePunc(tweet)
         tweet_removeNumbers = [item for item in tweet if not item.isdigit()]
         tweet_removeSingleCharacters = [s for s in tweet_removeNumbers if len(s) != 1]
-        tweet_removeObamaRomney = [s for s in tweet_removeSingleCharacters if s not in ('obama','romney')]
-        tweet_removetwoormore = [replaceTwoOrMore(word) for word in tweet_removeObamaRomney]
-        tweet_nostopwords = [word for word in tweet_removetwoormore if not word in STOPWORDS]
-        tweet_stemmed = [STEMMER.stem(word) for word in tweet_nostopwords]
-        tempList.append(tweet_stemmed)
+#        tweet_removeObamaRomney = [s for s in tweet_removeSingleCharacters if s not in ('obama','romney')]
+        tweet_removetwoormore = [replaceTwoOrMore(word) for word in tweet_removeSingleCharacters]
+        tweet_alphanumberic = removealphanumeric(tweet_removetwoormore)
+        tweet_nostopwords = [word for word in tweet_alphanumberic if not word in STOPWORDS]
+#        tweet_stemmed = [STEMMER.stem(word) for word in tweet_nostopwords]
+        for word in tweet_nostopwords:
+            if(word == 'yess'):
+                tweet_nostopwords.remove(word)
+                tweet_nostopwords.append('yes')
+        tempList.append(tweet_nostopwords)
     return tempList
 def AccessSheets():
     # OPEN THE EXCEL
     wb = openpyxl.load_workbook('training-Obama-Romney-tweets.xlsx')
-    obamaSheet = wb.get_sheet_by_name('Obama')
+    obamaSheet = wb.get_sheet_by_name('Romney')
     global obamaTweetList, obamaClassLabelList
     obamaTweetList, obamaClassLabelList = retrieveTweets(obamaSheet)
     # SEND TWEETS FOR PREPROCESSING
     obamaTweetList = preProcess(obamaTweetList)
+
+def saveProcessedTweets(tweetList,labelList):
+    csvfile = "processed3.csv"
+    # Assuming res is a flat list
+    with open(csvfile, "w") as output:
+        writer = csv.writer(output, lineterminator='\n')
+        for val in tweetList:
+            writer.writerow([val])
+        for val in labelList:
+            writer.writerow([val])
 
 def extract_features(tweet):
     global featureList
@@ -137,15 +165,21 @@ def TrainModel():
         str1 = ' '.join(item[0])
         tweetList.append(str1.strip())
         labelList.append(item[1])
+
+    saveProcessedTweets(tweetList, labelList)
     count_vect = CountVectorizer()
-    kf = KFold(n_splits=10, shuffle=False)
+    kf = StratifiedKFold(n_splits=10, shuffle=True)
     kf.get_n_splits(tweetList)
+
+    clf1 = classifier = SGDClassifier(loss="hinge", penalty="l2")
+    clf2 = svm.SVC(decision_function_shape='ovo', kernel='linear',probability = True)
+    clf3 = MultinomialNB(alpha=1.0, fit_prior=True, class_prior=None)
 
     precisionPositiveFold = 0
     recallPositiveFold = 0
     precisionNegativeFold = 0
     recallNegativeFold = 0
-    for traincv, testcv in kf.split(tweetList):
+    for traincv, testcv in kf.split(tweetList,labelList):
         xTweetList = []
         xLabelList = []
         xTestList = []
@@ -157,8 +191,9 @@ def TrainModel():
         tfidf_transformer = TfidfTransformer()
         X_train_tfidf = tfidf_transformer.fit_transform(X)
 
-        classifier = MultinomialNB(alpha=1.0)
-        classifier.fit(X_train_tfidf, xLabelList)
+#        classifier = VotingClassifier(estimators=[('nb', clf1), ('svm', clf2), ('neural', clf3)], voting='hard')
+        classifier = VotingClassifier(estimators=[('sgd', clf1), ('svm', clf2), ('nb',clf3)], voting='hard')
+        classifer = classifier.fit(X_train_tfidf, xLabelList)
 
         for i in range(0,len(testcv)):
             xTestList.append(tweetList[testcv[i]])
@@ -178,14 +213,19 @@ def TrainModel():
         precisionNegativeFold = precisionNegativeFold + precisionNegative
         recallNegativeFold = recallNegative + recallNegativeFold
 
-    print("Final Accuracy" + str(finalAccuracy / 10))
-    print("Final Positive Precision: " + str(precisionPositiveFold / 10))
-    print("Final Positive Recall: " + str(recallPositiveFold / 10))
-    print("Final Positive F1: " + str((2 * precisionPositive * recallPositive) / (precisionPositive + recallPositive)))
+    precisionPositiveFold = precisionPositiveFold/10
+    recallPositiveFold = recallPositiveFold/10
+    precisionNegativeFold = precisionNegativeFold/10
+    recallNegativeFold = recallNegativeFold/10
 
-    print("Final Negative Precision: " + str(precisionNegativeFold / 10))
-    print("Final Negative Recall: " + str(recallNegativeFold / 10))
-    print("Final Negative F1: " + str((2 * precisionPositive * recallPositive) / (precisionPositive + recallPositive)))
+    print("Final Accuracy" + str(finalAccuracy / 10))
+    print("Final Positive Precision: " + str(precisionPositiveFold))
+    print("Final Positive Recall: " + str(recallPositiveFold))
+    print("Final Positive F1: " + str((2 * precisionPositiveFold * recallPositiveFold) / (precisionPositiveFold + recallPositiveFold)))
+
+    print("Final Negative Precision: " + str(precisionNegativeFold))
+    print("Final Negative Recall: " + str(recallNegativeFold))
+    print("Final Negative F1: " + str((2 * precisionNegativeFold * recallNegativeFold) / (precisionNegativeFold + recallNegativeFold)))
     print("Final Accuracy:" + str(finalAccuracy/10))
     print("Tesing Done")
 
